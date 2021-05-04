@@ -1,0 +1,328 @@
+---
+title: "Coordinate descent algorithm for solving the lasso problems"
+author: "Xuhui Li"
+date: "11/17/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# install.packages('glmnet')
+```
+
+```{r}
+library('Matrix')
+library('glmnet')
+```
+
+```{r}
+# Soft threshold for Lasso
+soft_threshold_lasso <- function(rho, lambda) {
+  "Soft threshold function used for normalized data and lasso regression"
+  if (rho < -lambda) {
+   return(rho + lambda)
+  }
+  else if (rho > lambda) {
+   return(rho - lambda)
+  }
+  else {return(0)}
+}
+
+
+# Soft threshold for Elastic Net
+soft_threshold_elastic_net <- function(rho, lambda_1, lambda_2) {
+  "Soft threshold function used for normlized data and elastic net regression"
+  if (rho < -lambda_2) {
+   return((rho + lambda_2) / (1 + 2 * lambda_1))
+  }
+  else if (rho > lambda_2) {
+   return((rho - lambda_2) / (1 + 2 * lambda_1))
+  }
+  else {return(0)}
+}
+```
+
+
+```{r}
+# Coordinate gradient descent for lasso regression. The intercept parameter allows to specify whether or not we regularize theta_0.
+coordinate_descent <- function(beta, X, y, lambda_1 = 0, lambda_2 = 0, max_iters = 1000, lasso = FALSE, elastic_net = FALSE) {
+  
+  n = dim(X)[1] # number of observations  
+  p = dim(X)[2] # number of parameters 
+  
+  # Standardise matrix X
+  X <- apply(X,2,function(x) x - mean(x)) # centralize X
+  X_sd <- apply(X,2,function(x) sqrt(sum(x^2)/n)) # sd of each X
+  X <- apply(X,2,function(x) x/sqrt((sum(x^2)/n))) # standardize X
+  y <- y - mean(y) # centralize y 
+  y_sd <- sqrt(sum(y^2)/n) # sd of y
+  y <- y/y_sd # standardize y
+  
+  # Initialisation of useful variables 
+  tol <- 10^-7 # set convergence criterion
+  J_dif <- 1 # initialise difference between cost function
+  J <- sum(y^2)/(2*n) # Initialise J
+  iter <- 0    
+  
+  while (J_dif > tol){
+    J_prev <- J
+    # Looping through each coordinate
+    for (j in 1:p) {
+      #Vectorized implementation 
+      X_j = X[, j]
+      y_pred = X %*% beta 
+      beta_star = as.numeric((t(X_j) %*% (y - y_pred + beta[j] * X_j)) / n)
+      # Checking intercept parameters
+      # cat('Beta Star: ', beta_star, '\n')
+      if (lasso == TRUE) {
+        beta[j] = soft_threshold_lasso(beta_star, lambda_1)}
+      else if (elastic_net == TRUE) {
+        beta[j] = soft_threshold_elastic_net(beta_star, lambda_1, lambda_2)}
+        }
+      if (lasso == TRUE) {
+                J <- sum((y - X %*% beta)^2)/(2*n) + lambda_1*sum(abs(beta))} # new value of cost function with the new estimate for beta
+      else if (elastic_net == TRUE) {
+                J <- sum((y - X %*% beta)^2)/(2*n) + lambda_1*sum(abs(beta)) + lambda_2*sum(beta^2)} # new value of cost function with the new estimate for beta
+    J_dif <- abs(J - J_prev) # difference in cost functions between iterations
+    iter <- iter + 1
+    if (iter == max_iters){
+      return (beta * y_sd / X_sd) # Prevent function from entering infinite loop
+      break
+    }
+  }
+  # cat('converge after: ', iter, ' iterations', '\n')  
+  return (beta * y_sd / X_sd)
+  }
+```
+
+
+```{r}
+# Get Multinormial Matrix X
+get_MNormX <- function(n, p, X, rho = 0.5) {
+  sigma2 <- rep(0, p)
+  for (i in 1:p) {sigma2[i] = var(X[, i])}
+  Covar <- matrix(0, p, p) # Covariance Matrix 
+  for (i in 1:p) {
+    for (j in 1:p) {
+      Covar[i,j] <- (rho^abs(i-j) * sqrt(sigma2[i]) * sqrt(sigma2[j]))}
+  }
+  eigsys = eigen(Covar, symmetric = T)     # eigen analysis for Covar
+  eigval <- sqrt(eigsys$values)            # square-roots of the eigenvalues
+  eigvec <- as.matrix(eigsys$vectors)      # matrix of eigenvectors
+  diagmat <- eigvec * 0                    # Diagonal Matrix
+  for (i in 1:p) {
+    diagmat[i,i] <- eigval[i]              # D is diagonal matrix 
+    P <- eigvec %*% diagmat %*% t(eigvec)  # Matrix root of Covar 
+    X <- X %*% P}                          # Now each row of Z is N(0, Covar)
+  return(X)
+  }
+```
+
+
+``` {r}
+# Lasso
+lasso_results <- function(grid, theta_input, NEW_X.train, y.train, NEW_X.test, y.test, fold = 5) {
+  lasso_min_val_mse <- 100000 # Initialise validation mean-squared errors
+  lasso_lambda <- 0 # Initialise lambda corresponding with minimum mean_squrared errors
+  non_zeros_coefficients <- 0 # Initialise numbers of non-zero coefficients
+  for (i in 1:length(grid)) {
+    # cat('>> Lasso', '\n')
+    # cat('>> lambda 1', grid[i], '\n')
+    val_mse_list <- c()
+    n = nrow(NEW_X.train)
+    # random_numbers <- sample(n, replace = FALSE)
+    random_numbers <- rep(1:n)
+    for (j in 1:fold) {
+      current_fold <- random_numbers[random_numbers %% fold + 1 == j]
+      # cat('Current Fold: ', current_fold, '\n')
+      NEW_X.cv_train = NEW_X.train[random_numbers[! random_numbers %in% current_fold], ]
+      NEW_X.cv_val = NEW_X.train[current_fold, ]
+      y.cv_train = y.train[random_numbers[! random_numbers %in% current_fold]]
+      y.cv_val = y.train[current_fold]
+      theta_output = coordinate_descent(theta_input, NEW_X.cv_train, y.cv_train, lambda_1 = grid[i], lasso = TRUE, elastic_net = FALSE)
+      # cat('Coordinate Descent Lasso Theta: ', theta_output, '\n')
+      y_pred_val = NEW_X.cv_val %*% theta_output
+      y.errors_val = mean((y.cv_val - y_pred_val)^2)
+      val_mse_list = c(val_mse_list, y.errors_val)
+      # cat('Coordinate Descent Lasso Validaion MSE: ', y.errors_val, '\n')
+      }
+    y_val_mse = mean(val_mse_list)
+    if (y_val_mse < lasso_min_val_mse) {
+      lasso_min_val_mse = y_val_mse
+      theta_output = coordinate_descent(theta_input, NEW_X.train, y.train, lambda_1 = grid[i], lasso = TRUE, elastic_net = FALSE)
+      y_pred_test = NEW_X.test %*% theta_output
+      y.errors_test = mean((y.test - y_pred_test)^2)
+      lasso_min_test_mse = y.errors_test
+      lasso_lambda <- grid[i]
+      non_zeros_coefficients <- length(theta_output) - length(which(theta_output == 0))
+      lasso.mod = glmnet(NEW_X.train, y.train, alpha = 1, lambda = grid[i])
+      lasso.pred = predict(lasso.mod, newx = NEW_X.test)
+      lasso.mse = mean((y.test - lasso.pred)^2) 
+    }
+  }
+  # cat('Lambda: ', lasso_lambda, '   Minimum Test Set MSE: ', lasso_min_test_mse, '\n')
+  # cat('GLMNET Lasso Test Set MSE: ', lasso.mse, '\n')
+  # cat('Number of non-zero coefficients: ', non_zeros_coefficients, '\n')
+  return (c(lasso_min_test_mse, non_zeros_coefficients, lasso_lambda))
+}
+```
+
+```{r}
+# Elastic Net
+elastic_net_results <- function(grid, theta_input, NEW_X.train, y.train, NEW_X.test, y.test, fold = 5) {
+  elastic_net_min_val_mse <- 100000 # Initialise validation mean-squared errors
+  elastic_net_lambda_1 <- 0 # Initialise lambda corresponding with minimum mean_squrared errors
+  elastic_net_lambda_2 <- 0 # Initialise lambda corresponding with minimum mean_squrared errors
+  non_zeros_coefficients <- 0 # Initialise numbers of non-zero coefficients
+
+  for (i in 1:length(grid)) {
+    for (j in 1:length(grid)) {
+      # cat('>> Elastic Net', '\n')
+      # cat('lambda 1: ', grid[i], '\n')
+      # cat('lambda 2: ', grid[j], '\n')
+      val_mse_list <- c()
+      n = nrow(NEW_X.train)
+      random_numbers <- rep(1:n)
+      for (k in 1:fold) {
+        current_fold <- random_numbers[random_numbers %% fold + 1 == k]
+        NEW_X.cv_train = NEW_X.train[random_numbers[! random_numbers %in% current_fold], ]
+        NEW_X.cv_val = NEW_X.train[current_fold, ]
+        y.cv_train = y.train[random_numbers[! random_numbers %in% current_fold]]
+        y.cv_val = y.train[current_fold]
+        theta_output = coordinate_descent(theta_input, NEW_X.cv_train, y.cv_train, lambda_1 = grid[i], lambda_2 = grid[j], lasso = FALSE, elastic_net = TRUE)
+      # cat('Coordinate Descent Lasso Theta: ', theta_output, '\n')
+      y_pred_val = NEW_X.cv_val %*% theta_output
+      y.errors_val = mean((y.cv_val - y_pred_val)^2)
+      val_mse_list = c(val_mse_list, y.errors_val)
+      }
+    # ('Validation list: ', val_mse_list, '\n')
+    y_val_mse = mean(val_mse_list)
+      if (y_val_mse < elastic_net_min_val_mse) {
+      elastic_net_min_val_mse = y_val_mse
+      theta_output = coordinate_descent(theta_input, NEW_X.train, y.train, lambda_1 = grid[i], lambda_2 = grid[j], lasso = FALSE, elastic_net = TRUE)
+      y_pred_test = NEW_X.test %*% theta_output
+      y.errors_test = mean((y.test - y_pred_test)^2)
+      elastic_net_min_test_mse = y.errors_test
+      elastic_net_lambda_1 <- grid[i]
+      elastic_net_lambda_2 <- grid[j]
+      non_zeros_coefficients <- length(theta_output) - length(which(theta_output == 0))
+      }
+   }
+}
+
+  # cat('Lambda 1: ', elastic_net_lambda_1, 'Lambda 2:', elastic_net_lambda_2, '\n') 
+  # cat('Minimum Test Set MSE: ', elastic_net_min_test_mse, '\n')
+  # cat('Number of non-zero coefficients: ', non_zeros_coefficients, '\n')
+  return (c(elastic_net_min_test_mse, non_zeros_coefficients, elastic_net_lambda_1, elastic_net_lambda_2))
+}
+```
+
+
+```{r}
+get_beta <- function(num_beta, sparsity) {
+  beta = rep(0, num_beta)
+  b = sample(1:num_beta, sparsity * num_beta)
+  for (i in 1: length(b)) {
+    beta[b[i]] = runif(1, min = 1, max = 5)
+  }
+  return (beta)
+}
+```
+
+
+```{r}
+simulation <- function(num_datasets, n, p, sigma, sparsity, rho, train_frac, lasso = FALSE, elastic_net = FALSE) {
+  
+  lasso_mse_list <- c()
+  lasso_non_zero_coefficients_list <- c()
+  lasso_lambda_list <- c()
+  elastic_net_mse_list <- c()
+  elastic_net_non_zero_coefficients_list <- c()
+  elastic_net_lambda_1_list <- c()
+  elastic_net_lambda_2_list <- c()
+  mean_lambda_2 = 0
+  
+  cat('Number of observations: ', n, '\n')
+  cat('Number of parameters: ', p, '\n')
+  cat('Sigma: ', sigma, '\n')
+  cat('Sparsity level: ', p * sparsity, '\n')
+  cat('Correlation Rho: ', rho, '\n')
+  cat('Training observations: ', floor(n * train_frac), '\n')
+  
+  # Define beta 
+  B = get_beta(p, sparsity)
+  cat('Beta: ', B, '\n')
+
+  for (i in 1: num_datasets) {
+  # cat('>> Simulation round: ', i, '\n')
+  
+  set.seed(num_datasets) # Set seed to different numbers so that generating random X matrix
+  X = matrix(rnorm(n * p), n, p)  # X is n x p matrix with elements drawn from N(0, 1)
+
+  # Define y
+  eps = rnorm(n)
+  sigma = 3
+  NEW_X = get_MNormX(n, p, X, rho = rho)
+  y = NEW_X %*% B + sigma * eps
+  
+  # Initialise Beta Input 
+  beta_input = rep(0, p)
+  grid <- 10^seq(-10, 10, length = 21)
+  # Define different traning set, validation set and testing set
+  train_end = floor(n * train_frac)
+  y.train = y[1:train_end]
+  y.test = y[(train_end + 1):n]
+  NEW_X.train = NEW_X[1:train_end, ]
+  NEW_X.test = NEW_X[(train_end + 1):n, ]
+  
+  if (lasso == TRUE) {
+    lasso_Result = lasso_results(grid, beta_input, NEW_X.train, y.train, NEW_X.test, y.test)
+    mse = lasso_Result[1] 
+    non_zero_coefficients = lasso_Result[2]
+    lambda = lasso_Result[3]
+    lasso_mse_list = c(lasso_mse_list, mse)
+    lasso_non_zero_coefficients_list = c(lasso_non_zero_coefficients_list, non_zero_coefficients)
+    lasso_lambda_list = c(lasso_lambda_list, lambda)}
+  
+  if (elastic_net == TRUE) {
+    elastic_net_Result = elastic_net_results(grid, beta_input, NEW_X.train, y.train, NEW_X.test, y.test)
+    mse = elastic_net_Result[1]
+    non_zero_coefficients = elastic_net_Result[2]
+    lambda_1 = elastic_net_Result[3]
+    lambda_2 = elastic_net_Result[4]
+    elastic_net_mse_list = c(elastic_net_mse_list, mse)
+    elastic_net_non_zero_coefficients_list = c(elastic_net_non_zero_coefficients_list, non_zero_coefficients)
+    elastic_net_lambda_1_list = c(elastic_net_lambda_1_list, lambda_1)
+    elastic_net_lambda_2_list = c(elastic_net_lambda_2_list, lambda_2)}
+  }
+  lasso_mean_mse = mean(lasso_mse_list)
+  lasso_mean_non_zero_coefficients = mean(lasso_non_zero_coefficients_list)
+  lasso_mean_lambda = mean(lasso_lambda_list)
+  cat('>>> Lasso', '\n')
+  cat('Mean of mean-squared errors: ', lasso_mean_mse, '\n')
+  cat('Mean of estimated nonzero coefficients: ', lasso_mean_non_zero_coefficients, '\n')
+  cat('Mean of lambda : ', lasso_mean_lambda, '\n')
+  elastic_net_mean_mse = mean(elastic_net_mse_list)
+  elastic_net_mean_non_zero_coefficients = mean(lasso_non_zero_coefficients_list)
+  elastic_net_mean_lambda_1 = mean(elastic_net_lambda_1_list)
+  if (elastic_net == TRUE) {elastic_net_mean_lambda_2 = mean(elastic_net_lambda_2_list)}
+  cat('>>> Elastic Net', '\n')
+  cat('Mean of mean-squared errors: ', elastic_net_mean_mse, '\n')
+  cat('Mean of estimated nonzero coefficients: ', elastic_net_mean_non_zero_coefficients, '\n')
+  cat('Mean of lambda 1: ', elastic_net_mean_lambda_1, '\n')
+  cat('Mean of lambda 2: ', elastic_net_mean_lambda_2, '\n')
+  return (c(lasso_mean_mse, lasso_mean_non_zero_coefficients, lasso_mean_lambda, elastic_net_mean_mse, elastic_net_mean_non_zero_coefficients, elastic_net_mean_lambda_1, elastic_net_mean_lambda_2))
+}  
+```
+
+
+```{r}
+result_lasso = simulation(10, 240, 8, 3, 3/8, 0.5, 1/12, lasso = TRUE, elastic_net = TRUE)
+```
+
+```{r}
+result_lasso = simulation(10, 240, 16, 3, 3/8, 0.5, 10/12, lasso = TRUE, elastic_net = TRUE)
+```
